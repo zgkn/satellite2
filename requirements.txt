@@ -1,0 +1,17 @@
+# Pinned for Python 3.11 (the version the workflow uses).
+# matplotlib is not in the original list but is required: the wind streamlines use its streamplot.
+satpy==0.60.0
+pyresample==1.35.0
+pyproj==3.7.2
+numpy==2.4.6
+scipy==1.17.1
+pillow==13.0.0
+boto3==1.43.122
+pyshp==3.1.6
+xarray==2026.9.0
+netcdf4==1.7.5.1.post1
+h5netcdf==1.8.2
+scikit-learn==1.9.1
+pyorbital==1.13.0
+eccodes==2.50.0
+matplotlib==3.11.2

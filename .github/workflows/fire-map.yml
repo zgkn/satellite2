@@ -1,0 +1,144 @@
+name: Fire map
+
+# Manual only (runnable from the GitHub mobile app). No schedule on purpose.
+# VIIRS hotspots -> clusters -> Himawari-9 crops (+ ECMWF wind streamlines) -> static site on the `site` branch.
+on:
+  workflow_dispatch:
+    inputs:
+      max_images:
+        description: "How many of the biggest clusters get their own Himawari image (the rest go into one overview image)"
+        required: false
+        default: "5"
+        type: string
+      winds:
+        description: "Overlay ECMWF 925 hPa wind streamlines. If the wind data fail, images are still published without them"
+        required: false
+        default: true
+        type: boolean
+      dry_run:
+        description: "List clusters and planned crops only: no imagery, nothing published"
+        required: false
+        default: false
+        type: boolean
+      datetime_utc:
+        description: "Testing: Himawari scan time as YYYYMMDDHHMM UTC (minute ends in 0). Blank = newest complete scan"
+        required: false
+        default: ""
+        type: string
+      hotspot_window_hours:
+        description: "Hotspots from this many hours before the newest VIIRS scan (default 3; raise it between satellite passes)"
+        required: false
+        default: "3"
+        type: string
+
+# Only one run publishes at a time, so the site branch is never updated concurrently.
+concurrency:
+  group: fire-map-site
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      SITE_BRANCH: site
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: System packages (bzip2 for Satpy, fonts for captions)
+        run: |
+          missing=""
+          command -v bzip2 >/dev/null || missing="$missing bzip2"
+          fc-list 2>/dev/null | grep -qi dejavu || missing="$missing fonts-dejavu-core"
+          if [ -n "$missing" ]; then sudo apt-get update -qq && sudo apt-get install -y -qq $missing; fi
+          bzip2 --help 2>&1 | head -n 1 || true
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check the eccodes library
+        run: |
+          check='import eccodes; print("eccodes library", eccodes.codes_get_api_version())'
+          if ! python -c "$check"; then
+            echo "pip eccodes could not find the library; installing the system one"
+            sudo apt-get update -qq && sudo apt-get install -y -qq libeccodes-dev
+            python -c "$check"
+          fi
+
+      - name: Build the run
+        env:
+          IN_MAX_IMAGES: ${{ inputs.max_images }}
+          IN_WINDS: ${{ inputs.winds }}
+          IN_DRY_RUN: ${{ inputs.dry_run }}
+          IN_DATETIME: ${{ inputs.datetime_utc }}
+          IN_WINDOW: ${{ inputs.hotspot_window_hours }}
+        run: |
+          args=(--outdir output --workdir "$RUNNER_TEMP"
+                --max-images "${IN_MAX_IMAGES:-5}"
+                --window-hours "${IN_WINDOW:-3}")
+          if [ "$IN_WINDS" = "true" ]; then args+=(--winds); else args+=(--no-winds); fi
+          if [ "$IN_DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+          if [ -n "${IN_DATETIME// /}" ]; then args+=(--datetime-utc "$IN_DATETIME"); fi
+          python scripts/run.py "${args[@]}"
+
+      - name: Upload run data (kept 7 days)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: fire-map-${{ github.run_id }}
+          path: output/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Publish to the site branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          status=$(jq -r .status output/run_meta.json)
+          if [ "$status" = "dry_run" ]; then
+            echo "Dry run: nothing published."
+            exit 0
+          fi
+          pub="$RUNNER_TEMP/publish"
+          rm -rf "$pub"; mkdir -p "$pub"
+
+          # Carry over the existing site (the last 48 h of runs) if the branch exists yet.
+          if git ls-remote --exit-code --heads origin "$SITE_BRANCH" >/dev/null 2>&1; then
+            git fetch --depth=1 origin "$SITE_BRANCH"
+            git archive FETCH_HEAD | tar -x -C "$pub"
+          fi
+
+          # Adds the site files and this run, drops runs older than 48 h, rewrites runs.json and LATEST.md.
+          python scripts/publish.py --output output --publish "$pub"
+
+          # A single orphan commit, force-pushed: history never grows.
+          cd "$pub"
+          git init -q -b "$SITE_BRANCH"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Fire map $(jq -r .run_id "$GITHUB_WORKSPACE/output/run_meta.json") ($status)"
+          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$SITE_BRANCH"
+          echo "Pushed $(find . -name '*.png' | wc -l) PNGs to $SITE_BRANCH"
+
+      - name: Site link
+        if: ${{ always() }}
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          owner="${REPO%%/*}"; name="${REPO#*/}"
+          {
+            echo ""
+            echo "**Site:** https://$owner.github.io/$name/ (after enabling Pages: Settings > Pages > Deploy from a branch > \`site\` > root)  "
+            echo "**Fallback:** \`LATEST.md\` on the \`site\` branch."
+          } >> "$GITHUB_STEP_SUMMARY"
