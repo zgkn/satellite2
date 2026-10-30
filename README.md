@@ -13,7 +13,7 @@ hotspots are a light overlay. Everything runs in GitHub Actions. There is no loc
 ## Run it (from the GitHub mobile app)
 
 1. Open the repo, go to **Actions**, pick **Fire map**, tap **Run workflow**.
-2. Set the inputs (or leave the defaults) and start it. A run takes about 5-10 minutes.
+2. Set the inputs (or leave the defaults) and start it. Locally a 5-cluster run plus overview took about 3 minutes of processing, plus the dependency install.
 3. Open the site (below). The run's job summary lists the clusters and links to it.
 
 | Input | Default | Meaning |
