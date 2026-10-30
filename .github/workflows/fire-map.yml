@@ -1,6 +1,6 @@
 name: Fire map
 
-# Manual only (runnable from the GitHub mobile app). No schedule on purpose.
+# Manual only (runnable from the GitHub mobile app: Actions > Fire map > Run workflow). No schedule on purpose.
 # VIIRS hotspots -> clusters -> Himawari-9 crops (+ ECMWF wind streamlines) -> static site on the `site` branch.
 on:
   workflow_dispatch:
