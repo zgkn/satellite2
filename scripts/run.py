@@ -30,6 +30,7 @@ import config as C  # noqa: E402
 import himawari as H  # noqa: E402
 import hotspots as HS  # noqa: E402
 import render as R  # noqa: E402
+import trends as T  # noqa: E402
 import winds as W  # noqa: E402
 from util import UserError, annotate, log, s3_client  # noqa: E402
 
@@ -64,7 +65,8 @@ def write_geojson(hs: HS.Hotspots, path: Path) -> None:
     feats = []
     for i in range(len(hs)):
         props = dict(satellite=str(hs.sat[i]), time=iso(hs.time(i)), frp=round(float(hs.frp[i]), 2),
-                     cluster=f"C{int(hs.cluster[i]):02d}" if len(hs.cluster) else None)
+                     cluster=f"C{int(hs.cluster[i]):02d}" if len(hs.cluster) else None,
+                     seen=int(hs.seen[i]) if len(hs.seen) else 1)
         if hs.has_conf and hs.conf[i]:
             props["confidence"] = str(hs.conf[i])
         feats.append(dict(type="Feature", properties=props,
@@ -73,6 +75,25 @@ def write_geojson(hs: HS.Hotspots, path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- captions
+TIER_RGBA = {"severe": (255, 100, 90, 255), "watch": (255, 190, 60, 255)}
+TREND_TEXT = {"escalating": "GETTING WORSE", "new": "NEWLY FLAGGED", "easing": "easing", "steady": "steady"}
+
+
+def trend_note(c):
+    """(text, rgba) for the caption/summary line about how an area changed since the earlier run, or None."""
+    t = c.get("trend")
+    if not t:
+        return None
+    when = ""
+    if t.get("prev_hotspot_utc"):
+        when = f" since {dt.datetime.strptime(t['prev_hotspot_utc'], '%Y-%m-%dT%H:%M:%SZ'):%d %b %H:%M} UTC"
+    if t["state"] in ("escalating", "easing", "steady"):
+        text = f"{TREND_TEXT[t['state']]}: {c['count']} fires (was {t['prev_count']}), {c['summed_frp']:.0f} MW (was {t['prev_frp']:.0f}){when}"
+    else:
+        text = f"{TREND_TEXT[t['state']]}{when}"
+    return text, TIER_RGBA["severe"] if t["state"] in ("escalating", "new") else R.GREY
+
+
 def caption_builder(*, title, scan, newest_hotspot, now, mode, info, zenith, wind, extra_lines=()):
     sgt = scan.astimezone(C.SGT)
     age = (now - newest_hotspot).total_seconds() / 60
@@ -89,7 +110,9 @@ def caption_builder(*, title, scan, newest_hotspot, now, mode, info, zenith, win
             [("Day Fire RGB" if mode == "day" else "Night: 3.9 um", R.GREY)]
             + ([("   OBSCURED: mostly cloud", (255, 190, 60, 255))] if info.get("obscured") else []),
         ]
-        lines.extend([(t, R.GREY)] for t in extra_lines)
+        for note in extra_lines:  # text, or (text, rgba)
+            text, fill = note if isinstance(note, tuple) else (note, R.GREY)
+            lines.append([(text, fill)])
         if mode == "day" and zenith > C.LOW_SUN_ZENITH:
             lines.append([(f"LOW SUN: unreliable brightness (zenith {zenith:.0f}\N{DEGREE SIGN})", (255, 190, 60, 255))])
         if wind is not None and wind_drawn:
@@ -112,16 +135,19 @@ def render_job(job, files, scan, hs, wind, outdir: Path, now, has_conf):
     sub = subset(hs, bbox)
     is_overview = job["name"] == "overview"
     if is_overview:
-        title = f"Overview: {job['n_clusters']} clusters, {len(hs)} hotspots"
-        extra = [f"{job['n_overflow']} cluster(s) not individually imaged (top {job['n_imaged']} have crops)"]
+        title = f"Overview: {job['n_clusters']} flagged areas ({job['n_severe']} severe, {job['n_watch']} watch)"
+        extra = [f"{job['n_overflow']} flagged area(s) not individually imaged (top {job['n_imaged']} have crops)",
+                 ("Labels: red = severe, amber = watch", R.GREY)]
         avoid = None
         labels = job["labels"]
         size, ring_ss, spacing, grid = 15, 2, C.WIND_SPACING_OVERVIEW, C.GRID_STEP_OVERVIEW
         newest = job["newest"]
     else:
         c = job["cluster"]
-        title = f"{c['id']}  ·  {c['count']} hotspots  ·  {c['summed_frp']:.0f} MW FRP"
-        extra, labels = [], None
+        title = f"{c['id']}  {c['tier'].upper()}  ·  {c['count']} fires  ·  {c['summed_frp']:.0f} MW"
+        extra, labels = [(", ".join(c["reasons"]), TIER_RGBA[c["tier"]])], None
+        if trend_note(c):
+            extra.append(trend_note(c))
         avoid = (hs.lon[c["idx"]], hs.lat[c["idx"]])
         size, ring_ss, spacing, grid = 12, 3, C.WIND_SPACING_CROP, C.GRID_STEP_CROP
         newest = dt.datetime.fromtimestamp(c["newest_t"], dt.timezone.utc)
@@ -140,42 +166,52 @@ def render_job(job, files, scan, hs, wind, outdir: Path, now, has_conf):
 
 
 # ---------------------------------------------------------------------------- run
-def build_jobs(top, overflow, all_clusters, hs):
+def build_jobs(top, overflow, flagged, hs):
     jobs = []
     for c in top:
         jobs.append(dict(name=c["id"], cluster=c, bbox=c["crop"], res=C.CROP_RES, centroid=c["centroid"],
                          segments=H.needed_segments(c["crop"])))
     if overflow:
         w, s, e, n = C.REGION
-        newest = dt.datetime.fromtimestamp(max(c["newest_t"] for c in all_clusters), dt.timezone.utc)
-        labels = [(c["id"], *c["centroid"]) for c in all_clusters[:12]]
+        newest = dt.datetime.fromtimestamp(max(c["newest_t"] for c in flagged), dt.timezone.utc)
+        labels = [(c["id"], *c["centroid"], TIER_RGBA[c["tier"]]) for c in flagged[:12]]
         jobs.append(dict(name="overview", bbox=C.REGION, res=C.OVERVIEW_RES, centroid=((w + e) / 2, (s + n) / 2),
-                         segments=H.needed_segments(C.REGION), n_clusters=len(all_clusters),
+                         segments=H.needed_segments(C.REGION), n_clusters=len(flagged),
+                         n_severe=sum(c["tier"] == "severe" for c in flagged),
+                         n_watch=sum(c["tier"] == "watch" for c in flagged),
                          n_overflow=len(overflow), n_imaged=len(top), labels=labels, newest=newest))
     return jobs
 
 
-def job_summary(meta, clusters_json, dry_run: bool) -> str:
+def job_summary(meta, cj, dry_run: bool) -> str:
     out = [f"## Fire map run {meta['run_id']}", ""]
     out.append(f"**Status:** {meta['status']}" + (" (dry run: no imagery, nothing published)" if dry_run else "") + "  ")
     if meta.get("scan_utc"):
         out.append(f"**Himawari scan:** {meta['scan_utc']} / {meta['scan_sgt']}  ")
     if meta.get("newest_hotspot_utc"):
         out.append(f"**Newest hotspot:** {meta['newest_hotspot_utc']} ({meta['hotspot_age_min']} min old)  ")
-    out.append(f"**Hotspots:** {meta['n_hotspots']} in {meta['n_clusters']} clusters; winds: {meta['winds']}")
+    out.append(f"**Fires:** {meta['n_hotspots']} distinct ({meta['n_detections_raw']} detections before merging repeat sightings), "
+               f"{meta['total_frp']:,.0f} MW in total, in {meta['n_clusters']} clusters  ")
+    out.append(f"**Flagged:** {meta['n_severe']} severe, {meta['n_watch']} watch, {meta['n_ignored']} ignored; winds: {meta['winds']}")
     out.append("")
-    if clusters_json["clusters"]:
-        out += ["| ID | Hotspots | FRP (MW) | Centroid | Crop (W,S,E,N) | Mode | Image |", "|---|---|---|---|---|---|---|"]
-        for c in clusters_json["clusters"]:
+    rules = cj["rules"]
+    out.append(f"_Rules: dense = {rules['dense_min']}+ fires within {rules['dense_km']:g} km; intense = {rules['intense_sum_mw']:g}+ MW "
+               f"in the cluster or a {rules['intense_pixel_mw']:g}+ MW pixel; severe = both, watch = one._")
+    out.append("")
+    rows = cj["clusters"] + cj["overflow"]
+    if rows:
+        out += ["| ID | Tier | Why | Fires | MW | Trend | Centroid | Image |", "|---|---|---|---|---|---|---|---|"]
+        for c in rows:
             cl = c["centroid"]
-            out.append(f"| {c['id']} | {c['count']} | {c['summed_frp']:.0f} | {cl['lat']:.2f}, {cl['lon']:.2f} | "
-                       f"{','.join(f'{v:g}' for v in c['bbox'])} | {c.get('mode') or '-'} | "
-                       f"{'obscured' if c.get('obscured') else 'ok' if c.get('png') else (c.get('image_error') or 'none')} |")
-        if clusters_json.get("overview"):
-            ov = clusters_json["overview"]
-            out.append(f"\nOverview image: {ov['mode']} mode, {clusters_json['n_overflow']} clusters not individually imaged.")
-        elif clusters_json["n_overflow"]:
-            out.append(f"\n{clusters_json['n_overflow']} clusters not individually imaged.")
+            tn = trend_note(c)
+            img = ("obscured" if c.get("obscured") else "ok" if c.get("png") else
+                   (c.get("image_error") or ("overview only" if c in cj["overflow"] else "none")))
+            out.append(f"| {c['id']} | {c['tier']} | {', '.join(c['reasons'])} | {c['count']} | {c['summed_frp']:.0f} | "
+                       f"{tn[0].split(':')[0] if tn else '-'} | {cl['lat']:.2f}, {cl['lon']:.2f} | {img} |")
+        if cj.get("overview"):
+            out.append(f"\nOverview image: {cj['overview']['mode']} mode, {cj['n_overflow']} flagged areas not individually imaged.")
+    elif meta["n_hotspots"]:
+        out.append("Fires were detected, but none is dense or intense enough to flag, so no images were made.")
     return "\n".join(out) + "\n"
 
 
@@ -193,30 +229,41 @@ def run(args) -> dict:
         f"scan_override={args.datetime_utc or '-'} window={args.window_hours:g} h")
     hs, hinfo = HS.fetch_hotspots(now, window_h=args.window_hours)  # raises (loudly) if the download fails
     clusters = HS.cluster_hotspots(hs)
-    top, overflow = HS.plan_crops(clusters, max_images)
+    top, overflow, ignored = HS.plan_crops(clusters, max_images)
+    flagged = top + overflow   # severe first, then watch, each by summed FRP
 
     newest_hs = max((c["newest_t"] for c in clusters), default=None)
     newest_hs_dt = dt.datetime.fromtimestamp(newest_hs, dt.timezone.utc) if newest_hs else None
+    if flagged:
+        T.annotate_trends(flagged, T.load_previous(Path(args.previous) if args.previous else None, newest_hs_dt))
     meta = dict(run_id=run_id, generated_utc=iso(now), status="ok", scan_utc=None, scan_sgt=None,
                 newest_hotspot_utc=iso(newest_hs_dt),
                 hotspot_age_min=round((now - newest_hs_dt).total_seconds() / 60) if newest_hs_dt else None,
                 viirs_newest_scan_utc=iso(hinfo["newest_scan_utc"]), mode=None, winds="off",
-                n_hotspots=len(hs), n_clusters=len(clusters), n_imaged=0, n_overflow=len(overflow),
-                has_confidence=hs.has_conf, github_run_id=os.environ.get("GITHUB_RUN_ID"),
+                schema=T.SCHEMA, n_hotspots=len(hs), n_detections_raw=hinfo["n_raw"], total_frp=round(float(hs.frp.sum()), 1),
+                n_clusters=len(clusters), n_severe=sum(c["tier"] == "severe" for c in flagged),
+                n_watch=sum(c["tier"] == "watch" for c in flagged), n_ignored=len(ignored),
+                n_escalating=sum(1 for c in flagged if c["trend"] and c["trend"]["state"] == "escalating"),
+                n_imaged=0, n_overflow=len(overflow), has_confidence=hs.has_conf, github_run_id=os.environ.get("GITHUB_RUN_ID"),
                 window_hours=args.window_hours)
 
-    def cluster_entry(c):
+    def common(c):
         cx, cy = c["centroid"]
-        return dict(id=c["id"], rank=c["rank"], centroid=dict(lon=round(cx, 5), lat=round(cy, 5)), count=c["count"],
-                    summed_frp=round(c["summed_frp"], 1), bbox=list(c["crop"]), cluster_bbox=[round(v, 5) for v in c["cluster_bbox"]],
-                    newest_utc=iso(dt.datetime.fromtimestamp(c["newest_t"], dt.timezone.utc)), satellites=c["satellites"],
-                    confidence=c["confidence"], mode=None, png=None, thumb=None, obscured=False)
+        return dict(id=c["id"], rank=c["rank"], tier=c["tier"], reasons=c["reasons"], dense=c["dense"], intense=c["intense"],
+                    centroid=dict(lon=round(cx, 5), lat=round(cy, 5)), count=c["count"], core_fires=c["core_fires"],
+                    summed_frp=round(c["summed_frp"], 1), max_frp=round(c["max_frp"], 1),
+                    cluster_bbox=[round(v, 5) for v in c["cluster_bbox"]], trend=c["trend"],
+                    newest_utc=iso(dt.datetime.fromtimestamp(c["newest_t"], dt.timezone.utc)),
+                    satellites=c["satellites"], confidence=c["confidence"])
 
-    cj = dict(run_id=run_id, scan_utc=None, scan_sgt=None, winds="off", has_confidence=hs.has_conf,
+    def cluster_entry(c):
+        return dict(common(c), bbox=list(c["crop"]), mode=None, png=None, thumb=None, obscured=False)
+
+    cj = dict(schema=T.SCHEMA, run_id=run_id, scan_utc=None, scan_sgt=None, winds="off", has_confidence=hs.has_conf,
+              rules=dict(dense_min=C.DENSE_MIN_FIRES, dense_km=C.DENSE_RADIUS_KM, intense_sum_mw=C.INTENSE_SUM_MW,
+                         intense_pixel_mw=C.INTENSE_PIXEL_MW),
               clusters=[cluster_entry(c) for c in top], overview=None, n_overflow=len(overflow),
-              overflow=[dict(id=c["id"], count=c["count"], summed_frp=round(c["summed_frp"], 1),
-                             centroid=dict(lon=round(c["centroid"][0], 5), lat=round(c["centroid"][1], 5)),
-                             cluster_bbox=[round(v, 5) for v in c["cluster_bbox"]]) for c in overflow])
+              overflow=[common(c) for c in overflow], n_ignored=len(ignored))
 
     def finish(status: str):
         meta["status"] = status
@@ -227,7 +274,11 @@ def run(args) -> dict:
         annotate("notice", "No VIIRS hotspots in the region in the selected window: publishing a 'no hotspots' run.")
         return finish("no_hotspots")
 
-    jobs = build_jobs(top, overflow, clusters, hs)
+    if not flagged:
+        annotate("notice", "Fires were detected, but none is dense or intense enough to flag: no images are made.")
+        return finish("no_flagged")
+
+    jobs = build_jobs(top, overflow, flagged, hs)
     for j in jobs:
         log(f"  planned {j['name']}: bbox {j['bbox']} segments {j['segments']} res {j['res']}")
     if args.dry_run:
@@ -321,6 +372,8 @@ def main(argv=None) -> int:
     p.add_argument("--winds", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--datetime-utc", default="")
+    p.add_argument("--previous", default=None,
+                   help="folder with the previous site contents (runs.json, runs/), to tell whether areas are getting worse")
     p.add_argument("--window-hours", type=float, default=C.HOTSPOT_WINDOW_H,
                    help="hotspot window before the newest VIIRS scan start (default 3)")
     args = p.parse_args(argv)

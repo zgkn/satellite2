@@ -33,6 +33,7 @@ class Hotspots:
     t: np.ndarray           # scan start, epoch seconds (UTC)
     has_conf: bool = False
     cluster: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=int))
+    seen: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=int))   # passes that saw this fire
 
     def __len__(self) -> int:
         return int(self.lat.size)
@@ -179,10 +180,78 @@ def fetch_hotspots(now: dt.datetime, workdir: Path | None = None,
         cat = dict(lat=np.zeros(0), lon=np.zeros(0), frp=np.zeros(0), conf=np.zeros(0, "U8"),
                    sat=np.zeros(0, "U8"), t=np.zeros(0))
     hs = Hotspots(**cat, has_conf=bool((cat["conf"] != "").any()))
-    info = dict(newest_scan_utc=newest, n_granules=len(kept),
+    n_raw = len(hs)
+    log(f"{n_raw} detections inside region {C.REGION} (confidence {'available' if hs.has_conf else 'not available'})")
+    hs = dedupe(hs)
+    log(f"{len(hs)} distinct fires after merging repeat sightings within {C.DEDUP_KM:g} km "
+        f"({n_raw - len(hs)} duplicates from other passes or satellites)")
+    info = dict(newest_scan_utc=newest, n_granules=len(kept), n_raw=n_raw,
                 scan_times={s: max((g[3] for g in granules if g[0] == s), default=None) for s in C.EFIRE_BUCKETS})
-    log(f"{len(hs)} hotspots inside region {C.REGION} (confidence {'available' if hs.has_conf else 'not available'})")
     return hs, info
+
+
+# --------------------------------------------------------------------------- merging
+CONF_RANK = {"": 0, "low": 1, "nominal": 2, "high": 3}
+RANK_CONF = {v: k for k, v in CONF_RANK.items()}
+
+
+def _pass_ids(hs: Hotspots, gap_s: float = 1800.0) -> np.ndarray:
+    """Overpass number per detection: detections of one satellite more than 30 min apart are different passes."""
+    pid = np.zeros(len(hs), dtype=int)
+    nxt = 0
+    for sat in np.unique(hs.sat):
+        m = np.where(hs.sat == sat)[0]
+        times = np.unique(hs.t[m])
+        cur, last = nxt, None
+        ids = {}
+        for t in times:
+            if last is not None and t - last > gap_s:
+                cur += 1
+            ids[t] = cur
+            last = t
+        for i in m:
+            pid[i] = ids[hs.t[i]]
+        nxt = cur + 1
+    return pid
+
+
+def dedupe(hs: Hotspots, km: float = C.DEDUP_KM) -> Hotspots:
+    """Merge repeat sightings of one fire seen by another satellite or in another pass.
+
+    Passes are taken newest first. A detection from an older pass within ``km`` of a kept fire is the same fire: it is
+    dropped, but the kept fire takes the larger FRP and the higher confidence class. Detections within one pass are
+    never merged (neighbouring 375 m pixels are distinct fire pixels).
+    """
+    from sklearn.neighbors import BallTree
+
+    n = len(hs)
+    if n == 0:
+        hs.seen = np.zeros(0, dtype=int)
+        return hs
+    pid = _pass_ids(hs)
+    order = sorted(np.unique(pid), key=lambda p: -hs.t[pid == p].max())
+    rank = np.array([CONF_RANK.get(c, 0) for c in hs.conf])
+    keep_idx = np.zeros(0, dtype=int)
+    frp = hs.frp.copy()
+    seen = np.ones(n, dtype=int)
+    for p in order:
+        idx = np.where(pid == p)[0]
+        if keep_idx.size:
+            tree = BallTree(np.radians(np.column_stack([hs.lat[keep_idx], hs.lon[keep_idx]])), metric="haversine")
+            dist, nn = tree.query(np.radians(np.column_stack([hs.lat[idx], hs.lon[idx]])), k=1)
+            dup = dist[:, 0] * C.EARTH_RADIUS_KM < km
+            target = keep_idx[nn[dup, 0]]
+            np.maximum.at(frp, target, hs.frp[idx[dup]])
+            np.maximum.at(rank, target, rank[idx[dup]])
+            np.add.at(seen, target, 1)
+            idx = idx[~dup]
+        keep_idx = np.concatenate([keep_idx, idx])
+    keep_idx.sort()
+    out = Hotspots(lat=hs.lat[keep_idx], lon=hs.lon[keep_idx], frp=frp[keep_idx],
+                   conf=np.array([RANK_CONF[r] for r in rank[keep_idx]], dtype="U8"),
+                   sat=hs.sat[keep_idx], t=hs.t[keep_idx], has_conf=hs.has_conf)
+    out.seen = seen[keep_idx]
+    return out
 
 
 # ------------------------------------------------------------------------ clustering
@@ -209,41 +278,69 @@ def crop_box(cluster_bbox, res: float):
     return snap_box((clon - dlon / 2, clat - dlat / 2, clon + dlon / 2, clat + dlat / 2), res)
 
 
+TIER_RANK = {"severe": 2, "watch": 1, "none": 0}
+
+
 def cluster_hotspots(hs: Hotspots) -> list[dict]:
-    """DBSCAN (haversine, 20 km, min_samples=1). Returns clusters ranked by count, then summed FRP."""
+    """DBSCAN (haversine, 20 km, min_samples=1), then the severity rules.
+
+    Each cluster gets: ``core_fires`` (the most distinct fire pixels within DENSE_RADIUS_KM of any one fire), ``max_frp``,
+    ``dense`` / ``intense`` flags, a ``tier`` (severe = both, watch = one, none) and the ``reasons`` behind it.
+    Clusters are ranked by tier, then summed FRP, then fire count; the rank gives the id (C01 = worst).
+    """
     from sklearn.cluster import DBSCAN
+    from sklearn.neighbors import BallTree
 
     if not len(hs):
         return []
     xy = np.radians(np.column_stack([hs.lat, hs.lon]))
     labels = DBSCAN(eps=C.CLUSTER_EPS_KM / C.EARTH_RADIUS_KM, min_samples=1, metric="haversine",
                     algorithm="ball_tree").fit_predict(xy)
+    near = BallTree(xy, metric="haversine").query_radius(xy, r=C.DENSE_RADIUS_KM / C.EARTH_RADIUS_KM, count_only=True)
     out = []
     for lab in np.unique(labels):
         idx = np.where(labels == lab)[0]
         lat, lon = hs.lat[idx], hs.lon[idx]
         mix = Counter(c for c in hs.conf[idx] if c)
+        total, peak, core = float(hs.frp[idx].sum()), float(hs.frp[idx].max()), int(near[idx].max())
+        dense = core >= C.DENSE_MIN_FIRES
+        intense = total >= C.INTENSE_SUM_MW or peak >= C.INTENSE_PIXEL_MW
+        reasons = []
+        if dense:
+            reasons.append(f"{core} fires within {C.DENSE_RADIUS_KM:g} km")
+        if intense:
+            reasons.append(f"{total:,.0f} MW total" if total >= C.INTENSE_SUM_MW else f"{peak:.0f} MW single pixel")
         out.append(dict(
-            label=int(lab), idx=idx, count=int(idx.size), summed_frp=float(hs.frp[idx].sum()),
+            label=int(lab), idx=idx, count=int(idx.size), summed_frp=total, max_frp=peak, core_fires=core,
+            dense=bool(dense), intense=bool(intense),
+            tier="severe" if dense and intense else "watch" if dense or intense else "none", reasons=reasons,
             centroid=(float(lon.mean()), float(lat.mean())),  # (lon, lat)
             cluster_bbox=(float(lon.min()), float(lat.min()), float(lon.max()), float(lat.max())),
             newest_t=float(hs.t[idx].max()),
             confidence={k: int(mix.get(k, 0)) for k in CONF_ORDER} if hs.has_conf else None,
-            satellites=sorted(set(hs.sat[idx].tolist())),
+            satellites=sorted(set(hs.sat[idx].tolist())), trend=None,
         ))
-    out.sort(key=lambda c: (-c["count"], -c["summed_frp"]))
+    out.sort(key=lambda c: (-TIER_RANK[c["tier"]], -c["summed_frp"], -c["count"]))
     hs.cluster = np.zeros(len(hs), dtype=int)
     for rank, c in enumerate(out, 1):
         c["rank"], c["id"] = rank, f"C{rank:02d}"
         hs.cluster[c["idx"]] = rank
-    log(f"{len(out)} clusters; largest: " + ", ".join(
-        f"{c['id']} ({c['count']} hs, {c['summed_frp']:.0f} MW)" for c in out[:5]))
+    n_sev = sum(c["tier"] == "severe" for c in out)
+    n_watch = sum(c["tier"] == "watch" for c in out)
+    log(f"{len(out)} clusters: {n_sev} severe, {n_watch} watch, {len(out) - n_sev - n_watch} ignored. Worst: " + ", ".join(
+        f"{c['id']} {c['tier']} ({c['count']} fires, {c['core_fires']} within {C.DENSE_RADIUS_KM:g} km, "
+        f"{c['summed_frp']:.0f} MW)" for c in out[:5]))
     return out
 
 
-def plan_crops(clusters: list[dict], max_images: int) -> tuple[list[dict], list[dict]]:
-    """Top ``max_images`` clusters get a crop box; the rest are overflow."""
-    top, overflow = clusters[:max_images], clusters[max_images:]
+def plan_crops(clusters: list[dict], max_images: int) -> tuple[list[dict], list[dict], list[dict]]:
+    """Flagged clusters (severe first, then watch): the top ``max_images`` get a crop box, the rest are overflow.
+
+    Returns (imaged, overflow, ignored); ignored clusters are neither severe nor watch and are not imaged.
+    """
+    flagged = [c for c in clusters if c["tier"] != "none"]
+    ignored = [c for c in clusters if c["tier"] == "none"]
+    top, overflow = flagged[:max_images], flagged[max_images:]
     for c in top:
         c["crop"] = crop_box(c["cluster_bbox"], C.CROP_RES)
-    return top, overflow
+    return top, overflow, ignored

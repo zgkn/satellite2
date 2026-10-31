@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       max_images:
-        description: "How many of the biggest clusters get their own Himawari image (the rest go into one overview image)"
+        description: "How many flagged areas (severe first, then watch) get their own Himawari image; the rest go into one overview image"
         required: false
         default: "5"
         type: string
@@ -74,6 +74,19 @@ jobs:
             python -c "$check"
           fi
 
+      - name: Fetch the existing site (earlier runs, to see whether areas are getting worse)
+        run: |
+          pub="$RUNNER_TEMP/publish"
+          echo "PUB=$pub" >> "$GITHUB_ENV"
+          rm -rf "$pub"; mkdir -p "$pub"
+          if git ls-remote --exit-code --heads origin "$SITE_BRANCH" >/dev/null 2>&1; then
+            git fetch --depth=1 origin "$SITE_BRANCH"
+            git archive FETCH_HEAD | tar -x -C "$pub"
+            echo "Fetched the existing site branch."
+          else
+            echo "No site branch yet."
+          fi
+
       - name: Build the run
         env:
           IN_MAX_IMAGES: ${{ inputs.max_images }}
@@ -82,7 +95,7 @@ jobs:
           IN_DATETIME: ${{ inputs.datetime_utc }}
           IN_WINDOW: ${{ inputs.hotspot_window_hours }}
         run: |
-          args=(--outdir output --workdir "$RUNNER_TEMP"
+          args=(--outdir output --workdir "$RUNNER_TEMP" --previous "$PUB"
                 --max-images "${IN_MAX_IMAGES:-5}"
                 --window-hours "${IN_WINDOW:-3}")
           if [ "$IN_WINDS" = "true" ]; then args+=(--winds); else args+=(--no-winds); fi
@@ -109,14 +122,7 @@ jobs:
             echo "Dry run: nothing published."
             exit 0
           fi
-          pub="$RUNNER_TEMP/publish"
-          rm -rf "$pub"; mkdir -p "$pub"
-
-          # Carry over the existing site (the last 48 h of runs) if the branch exists yet.
-          if git ls-remote --exit-code --heads origin "$SITE_BRANCH" >/dev/null 2>&1; then
-            git fetch --depth=1 origin "$SITE_BRANCH"
-            git archive FETCH_HEAD | tar -x -C "$pub"
-          fi
+          pub="$PUB"   # the existing site (last 48 h of runs), fetched before the build
 
           # Adds the site files and this run, drops runs older than 48 h, rewrites runs.json and LATEST.md.
           python scripts/publish.py --output output --publish "$pub"

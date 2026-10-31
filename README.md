@@ -3,7 +3,7 @@
 A manually triggered GitHub Actions workflow that
 
 1. downloads the latest **VIIRS** active-fire hotspots (NOAA EFIRE, 375 m) over Sumatra and Kalimantan,
-2. clusters them and picks the biggest clusters,
+2. clusters them and flags the areas most likely to turn into a serious haze problem (**severe** and **watch**),
 3. makes a cropped **Himawari-9** image for each cluster (Day Fire RGB by day, 3.9 µm by night) with **ECMWF** wind streamlines,
 4. publishes everything to a static, mobile-friendly map on **GitHub Pages**.
 
@@ -18,7 +18,7 @@ hotspots are a light overlay. Everything runs in GitHub Actions. There is no loc
 
 | Input | Default | Meaning |
 |---|---|---|
-| `max_images` | `5` | How many of the biggest clusters get their own image. The rest go into one overview image. |
+| `max_images` | `5` | How many flagged areas (severe first, then watch) get their own image. The rest go into one overview image. Areas that are not flagged get no image. |
 | `winds` | on | Overlay ECMWF 925 hPa streamlines. If the wind data cannot be used, images are still published without them (the site says "winds: skipped"). |
 | `dry_run` | off | List the clusters and planned crops in the job summary. No imagery, nothing published. |
 | `datetime_utc` | blank | Testing: use this Himawari scan (`YYYYMMDDHHMM`, minute ending in 0). Blank = newest complete scan. A missing or incomplete scan fails the run. |
@@ -67,8 +67,18 @@ Runs older than 48 hours are dropped. A concurrency group makes sure only one ru
   granules starting within the window before it are kept. NaN or negative FRP and points outside the region
   (lon 94.5 to 119.5, lat -6.5 to 7.5) are dropped. Files are downloaded in 8 threads but **opened one at a time**
   (netCDF4/HDF5 crashes when opened from several threads).
-* **Clusters**: DBSCAN, haversine, 20 km, `min_samples=1`. Ranked by hotspot count, then summed FRP. Each crop is the cluster bbox plus 50 km,
-  at least 300 km square centred on the cluster, clipped to the region.
+* **Merging repeat sightings**: the same fire is often seen by two or three satellites, or twice by one. A detection from an older pass within
+  0.45 km of a fire already kept is the same fire: it is counted once and the fire keeps its strongest FRP. Detections within one pass are never merged.
+  In a real run this removed about a third of the detections.
+* **Clusters and severity**: DBSCAN (haversine, 20 km, `min_samples=1`) groups fires. Two warning signs are then checked per cluster
+  (all numbers are in `scripts/config.py`):
+  * **Dense** (fires packed tight, possibly out of control): some fire has at least **30** distinct fires within **10 km**.
+  * **Intense** (a lot of heat, so a lot of smoke): the cluster's summed FRP is at least **500 MW**, or any single pixel is at least **100 MW**.
+  * **Severe** = both, **watch** = one, anything else is ignored (no image). Clusters are ranked severe first, then by summed FRP; `C01` is the worst.
+  * **Getting worse**: each flagged area is compared with the newest earlier run on the site whose newest hotspot is at least 2 h older
+    (centroids within 30 km). It is marked *getting worse* if fires or FRP grew by 1.5x and by at least 10 fires or 100 MW,
+    *easing* if they fell likewise, *newly flagged* if there was nothing flagged there before, otherwise *steady*. Without an earlier comparable run there is no trend.
+  * Each crop is the cluster bbox plus 50 km, at least 300 km square centred on the cluster, clipped to the region.
 * **Himawari-9** (`scripts/himawari.py`): `s3://noaa-himawari9/AHI-L1b-FLDK/`. The newest scan, walking back in 10 min steps for up to 3 h, where
   every needed file exists. Needed segments come from the geostationary projection (the region needs 5-6, a crop usually 1-2).
   Satpy `ahi_hsd` reader, plain reflectance / brightness temperature (no modifiers), nearest-neighbour resampling to a lat/lon grid
@@ -90,9 +100,12 @@ Runs older than 48 hours are dropped. A concurrency group makes sure only one ru
   Confidence comes from `FP_FireMask` instead: 7 = low, 8 = nominal, 9 = high. Markers are coloured by it
   (yellow = low, white = nominal, cyan = high); if it were missing they would be coloured by FRP.
 * **Persistent heat sources** (flaring, volcanoes: `FP_PersistentAnomalyCategory`) are not filtered out.
+* **Thresholds are a starting point.** 30 fires / 10 km and 500 MW / 100 MW were chosen from one day of data (3 severe and 5 watch out of 155 clusters on a busy
+  daytime sample, 1 severe on a quiet night-pass sample). Tune them in `scripts/config.py` after a few runs.
+* **A run can have nothing to show**: `no hotspots` (nothing in the window), `nothing flagged` (fires, but none severe or watch: no images, the hotspots are still on the map) or `no imagery`.
 * **Age of the newest hotspot** in the captions and the header is measured at run time, not at scan time.
 * **Crops at the region edge** are clipped to the region (not shifted), so they can be smaller than 300 km on one side.
-* **Overview** uses a 5° graticule (1° is too busy at that size) and labels the 12 largest clusters. Its mode follows the sun at the region centre.
+* **Overview** uses a 5° graticule (1° is too busy at that size) and labels the 12 worst flagged areas (red = severe, amber = watch). Its mode follows the sun at the region centre.
 * **Himawari 3.9 µm and 10.4 µm pixels are 2 km**, so the red channel and night images look blocky. This is expected.
 * If no complete Himawari scan is found in 3 h, the run still publishes the hotspots and clusters, without imagery.
   If one cluster's image fails, the others are still made. If the hotspot download fails, the run fails loudly and publishes nothing.

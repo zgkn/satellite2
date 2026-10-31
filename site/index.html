@@ -24,13 +24,14 @@
 <main>
   <div id="map" role="application" aria-label="Map of VIIRS hotspots and Himawari-9 crops"></div>
   <section id="cardsWrap">
-    <h2>Clusters</h2>
+    <h2>Flagged areas</h2>
     <div id="cards" class="cards"></div>
+    <p id="rules" class="rules" hidden></p>
   </section>
 </main>
 
 <footer>
-  <p><strong>Hotspots</strong> are only the pointer: NOAA VIIRS 375&nbsp;m active fire (EFIRE; NOAA-20, NOAA-21, S-NPP).
+  <p><strong>Severe</strong> areas have fires packed tight <em>and</em> a lot of heat; <strong>watch</strong> areas have one of the two. Hotspots are only the pointer: NOAA VIIRS 375&nbsp;m active fire (EFIRE; NOAA-20, NOAA-21, S-NPP).
   The product is the latest <strong>Himawari-9</strong> AHI image (JMA, via the NOAA Open Data Dissemination
   program) cropped to each cluster. Day Fire RGB follows the NOAA/CIRA recipe on AHI bands; at night the
   3.9&nbsp;&micro;m band is shown.</p>

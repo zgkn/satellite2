@@ -148,7 +148,18 @@
     } else if (meta.viirs_newest_scan_utc) {
       chip('Newest VIIRS data', fmt(new Date(meta.viirs_newest_scan_utc)) + ' UTC');
     }
-    chip('Clusters', String(meta.n_clusters) + (meta.n_hotspots ? ' (' + meta.n_hotspots + ' hotspots)' : ''));
+    if (meta.schema === 2) {
+      if (meta.n_hotspots) {
+        chip('Flagged', meta.n_severe + ' severe \u00b7 ' + meta.n_watch + ' watch',
+          meta.n_severe > 0 ? 'sev' : meta.n_watch > 0 ? 'watch' : '');
+        if (meta.n_escalating > 0) chip('Getting worse', String(meta.n_escalating), 'sev');
+        chip('Fires', meta.n_hotspots + ' \u00b7 ' + Math.round(meta.total_frp).toLocaleString('en-US') + ' MW');
+      } else {
+        chip('Fires', '0');
+      }
+    } else {
+      chip('Clusters', String(meta.n_clusters) + (meta.n_hotspots ? ' (' + meta.n_hotspots + ' hotspots)' : ''));
+    }
     if (meta.mode) chip('Mode', meta.mode === 'day' ? 'Day Fire' : meta.mode === 'night' ? 'Night 3.9 µm' : 'Day + night');
     var w = meta.winds || 'off';
     chip('Winds', w === 'skipped' ? 'skipped' : w === 'off' ? 'off' : w.replace(/^ECMWF IFS /, ''), w === 'skipped' ? 'warn' : '');
@@ -157,6 +168,8 @@
     var msg = null, info = false;
     if (meta.status === 'no_hotspots') {
       msg = 'No VIIRS hotspots in the region in the selected window. VIIRS passes over Indonesia mostly around 05–08 and 17–20 UTC, so this is normal between passes.'; info = true;
+    } else if (meta.status === 'no_flagged') {
+      msg = 'Fires were detected, but none is dense or intense enough to flag as severe or watch, so no images were made. The hotspots are still on the map.'; info = true;
     } else if (meta.status === 'no_imagery') {
       msg = 'Hotspots were found, but no complete Himawari-9 scan was available, so there are no satellite images in this run.';
     } else if (w === 'skipped') {
@@ -192,10 +205,19 @@
       }
       var m = el('div', 'meta');
       var t = el('div', 't', c.id);
+      if (c.tier) t.appendChild(badge(c.tier === 'severe' ? 'SEVERE' : 'WATCH', c.tier));
+      if (c.trend && c.trend.state === 'escalating') t.appendChild(badge('\u25b2 getting worse', 'worse'));
+      else if (c.trend && c.trend.state === 'new') t.appendChild(badge('newly flagged', 'worse'));
+      else if (c.trend && c.trend.state === 'easing') t.appendChild(badge('easing'));
       if (c.mode) t.appendChild(badge(c.mode === 'day' ? 'Day Fire' : 'Night 3.9 µm'));
       if (c.obscured) t.appendChild(badge('obscured', 'warn'));
       m.appendChild(t);
-      m.appendChild(el('div', 's', c.count + ' hotspots · ' + Math.round(c.summed_frp) + ' MW'));
+      if (c.reasons && c.reasons.length) m.appendChild(el('div', 's why ' + c.tier, c.reasons.join(' \u00b7 ')));
+      m.appendChild(el('div', 's', c.count + ' fires \u00b7 ' + Math.round(c.summed_frp).toLocaleString('en-US') + ' MW'));
+      if (c.trend && c.trend.prev_count != null) {
+        m.appendChild(el('div', 's', 'Was ' + c.trend.prev_count + ' fires \u00b7 ' + Math.round(c.trend.prev_frp) + ' MW' +
+          (c.trend.prev_hotspot_utc ? ' at ' + fmt(new Date(c.trend.prev_hotspot_utc)) + ' UTC' : '')));
+      }
       m.appendChild(el('div', 's', c.centroid.lat.toFixed(2) + ', ' + c.centroid.lon.toFixed(2) +
         (c.newest_utc ? ' · ' + fmt(new Date(c.newest_utc)) + ' UTC' : '')));
       if (c.confidence) {
@@ -215,7 +237,8 @@
     });
     if (cj.n_overflow > 0) {
       var o = el('div', 'over');
-      o.appendChild(document.createTextNode(cj.n_overflow + ' more cluster' + (cj.n_overflow === 1 ? '' : 's') +
+      var noun = cj.schema === 2 ? 'flagged area' : 'cluster';
+      o.appendChild(document.createTextNode(cj.n_overflow + ' more ' + noun + (cj.n_overflow === 1 ? '' : 's') +
         ' not individually imaged' + (cj.overview ? '; see the overview layer.' : '.')));
       if (cj.overview) {
         var b = el('button', null, 'Show overview');
@@ -223,9 +246,33 @@
         b.addEventListener('click', function () { showOverview(); });
         o.appendChild(b);
       }
+      if (cj.overflow && cj.overflow.length && cj.overflow[0].tier) {
+        var det = document.createElement('details');
+        det.appendChild(el('summary', null, 'List them'));
+        cj.overflow.forEach(function (c) {
+          var line = el('div', 'ovl ' + c.tier);
+          line.textContent = c.id + ' \u00b7 ' + c.tier + ' \u00b7 ' + c.count + ' fires \u00b7 ' +
+            Math.round(c.summed_frp) + ' MW \u00b7 ' + c.centroid.lat.toFixed(2) + ', ' + c.centroid.lon.toFixed(2) +
+            (c.trend && c.trend.state === 'escalating' ? ' \u00b7 getting worse' : '');
+          det.appendChild(line);
+        });
+        o.appendChild(det);
+      }
       wrap.appendChild(o);
     }
-    if (!cj.clusters.length) wrap.appendChild(el('div', 'over', 'No clusters in this run.'));
+    if (!cj.clusters.length && !cj.n_overflow) {
+      wrap.appendChild(el('div', 'over', cj.schema === 2 ? 'Nothing flagged in this run.' : 'No clusters in this run.'));
+    }
+    var rules = $('#rules');
+    if (cj.rules) {
+      rules.textContent = 'Flagging rules: dense = ' + cj.rules.dense_min + '+ fires within ' + cj.rules.dense_km +
+        ' km; intense = ' + cj.rules.intense_sum_mw + '+ MW in the cluster or a ' + cj.rules.intense_pixel_mw +
+        '+ MW pixel. Severe = both, watch = one. Repeat sightings of one fire by other satellites or passes are counted once.' +
+        (cj.n_ignored ? ' ' + cj.n_ignored + ' smaller clusters are not shown.' : '');
+      rules.hidden = false;
+    } else {
+      rules.hidden = true;
+    }
   }
 
   function focusCluster(c) {
@@ -242,6 +289,15 @@
     map.fitBounds(layer.getBounds());
     select(layer, 'overview');
     $('#map').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  var TIER_COLOUR = { severe: '#ff4d3d', watch: '#ffb02e' };
+  function outline(c) {
+    var cb = c.cluster_bbox, pad = 0.03;
+    var rect = L.rectangle([[cb[1] - pad, cb[0] - pad], [cb[3] + pad, cb[2] + pad]],
+      { pane: 'hot', renderer: hotRenderer, color: TIER_COLOUR[c.tier] || '#ff8a3d', weight: 1.5, fill: false, dashArray: '4 3' });
+    rect.bindTooltip(c.id, { permanent: true, direction: 'top', className: 'cl-label', offset: [0, -2] });
+    return rect;
   }
 
   function loadRun(id) {
@@ -272,12 +328,12 @@
           im.on('add', function () { select(im, c.id); });
           all.push(im.getBounds());
         }
-        var cb = c.cluster_bbox, pad = 0.03;
-        var rect = L.rectangle([[cb[1] - pad, cb[0] - pad], [cb[3] + pad, cb[2] + pad]],
-          { pane: 'hot', renderer: hotRenderer, color: '#ff8a3d', weight: 1.5, fill: false, dashArray: '4 3' });
-        rect.bindTooltip(c.id, { permanent: true, direction: 'top', className: 'cl-label', offset: [0, -2] });
+        var rect = outline(c);
         outlines.addLayer(rect);
         all.push(rect.getBounds());
+      });
+      (cj.overflow || []).forEach(function (c) {
+        if (c.cluster_bbox) outlines.addLayer(outline(c));
       });
       overlays['Cluster outlines'] = outlines;
       var hot = hotspotLayer(gj);
@@ -302,7 +358,9 @@
   // ---------------------------------------------------------------- boot
   function runLabel(r) {
     var t = r.scan_iso ? new Date(r.scan_iso) : new Date(r.generated_utc);
-    var tail = r.status === 'no_hotspots' ? 'no hotspots' : r.status === 'no_imagery' ? 'no imagery'
+    var tail = r.status === 'no_hotspots' ? 'no hotspots' : r.status === 'no_flagged' ? 'nothing flagged'
+      : r.status === 'no_imagery' ? 'no imagery'
+      : r.schema === 2 ? r.n_severe + ' severe \u00b7 ' + r.n_watch + ' watch'
       : r.n_imaged + '/' + r.n_clusters + ' imaged';
     return fmt(t, 8) + ' SGT · ' + tail;
   }

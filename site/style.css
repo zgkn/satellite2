@@ -79,6 +79,20 @@ select {
 .card .s { color: var(--muted); font-size: 13px; }
 .tag { font-size: 11px; border: 1px solid var(--line); border-radius: 999px; padding: 0 7px; color: var(--muted); font-weight: 500; }
 .tag.warn { color: var(--warn); border-color: #6a5320; }
+.tag.severe { color: #fff; background: #b3261e; border-color: #b3261e; font-weight: 650; }
+.tag.watch { color: #1b1300; background: var(--warn); border-color: var(--warn); font-weight: 650; }
+.tag.worse { color: var(--bad); border-color: #7a2f2f; }
+.card .why { font-weight: 550; }
+.card .why.severe { color: var(--bad); }
+.card .why.watch { color: var(--warn); }
+.chip.sev { border-color: #7a2f2f; color: var(--bad); }
+.chip.watch { border-color: #6a5320; color: var(--warn); }
+.over details { margin-top: 8px; }
+.over summary { cursor: pointer; min-height: 32px; }
+.ovl { font-size: 13px; padding: 2px 0; }
+.ovl.severe { color: var(--bad); }
+.ovl.watch { color: var(--warn); }
+.rules { margin: 12px 0 0; color: var(--muted); font-size: 12.5px; max-width: 70ch; }
 .mix { display: flex; height: 6px; border-radius: 3px; overflow: hidden; background: var(--line); margin-top: auto; }
 .mix i { display: block; height: 100%; }
 .mix .low { background: #ffeb6e; } .mix .nominal { background: #fff; } .mix .high { background: #6eebff; }

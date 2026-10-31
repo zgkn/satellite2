@@ -142,10 +142,11 @@ def draw_labels(img, bbox, res, labels, size: int):
     layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
     d = ImageDraw.Draw(layer)
     fnt = font(size)
-    for text, lon, lat in labels:
+    for label in labels:  # (text, lon, lat) or (text, lon, lat, rgba)
+        text, lon, lat = label[:3]
         x, y = to_px(lon, lat, bbox, res)
-        d.text((float(x) + 7, float(y) - size * 0.5), text, font=fnt, fill=WHITE, stroke_width=2,
-               stroke_fill=(0, 0, 0, 200))
+        d.text((float(x) + 7, float(y) - size * 0.5), text, font=fnt, fill=label[3] if len(label) > 3 else WHITE,
+               stroke_width=2, stroke_fill=(0, 0, 0, 200))
     return Image.alpha_composite(img, layer)
 
 

@@ -22,6 +22,23 @@ EFIRE_BUCKETS = {
 HOTSPOT_WINDOW_H = 3  # keep granules starting this long before the newest one
 DOWNLOAD_WORKERS = 8
 
+# ---- severity rules ----
+# Repeat sightings of the same fire (other satellite, or another pass) closer than this are merged.
+DEDUP_KM = 0.45
+# DENSE: fires packed tight, i.e. some fire has at least DENSE_MIN_FIRES distinct fire pixels within DENSE_RADIUS_KM.
+DENSE_RADIUS_KM = 10.0
+DENSE_MIN_FIRES = 30
+# INTENSE: the cluster's summed FRP, or any single pixel's FRP, is at least this many MW.
+INTENSE_SUM_MW = 500.0
+INTENSE_PIXEL_MW = 100.0
+# Severe = dense and intense; Watch = one of them; anything else is ignored (no image).
+# Trend: compare with the newest earlier run whose newest hotspot is at least TREND_MIN_AGE_H older.
+TREND_MIN_AGE_H = 2.0
+TREND_MATCH_KM = 30.0     # same area if the cluster centroids are within this distance
+TREND_RATIO = 1.5         # escalating/easing: fires or FRP changed by this factor ...
+TREND_MIN_FIRES = 10      # ... and by at least this many fires
+TREND_MIN_MW = 100.0      # ... or this many MW
+
 # ---- clustering and crops ----
 CLUSTER_EPS_KM = 20.0
 EARTH_RADIUS_KM = 6371.0

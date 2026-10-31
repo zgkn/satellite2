@@ -43,16 +43,29 @@ def latest_md(meta: dict, clusters: dict) -> str:
         out.append(f"- Himawari-9 scan: {meta['scan_utc']} / {meta['scan_sgt']}")
     if meta.get("newest_hotspot_utc"):
         out.append(f"- Newest VIIRS hotspot: {meta['newest_hotspot_utc']} ({meta['hotspot_age_min']} min old at run time)")
-    out.append(f"- Hotspots: {meta['n_hotspots']} in {meta['n_clusters']} clusters; "
-               f"{meta['n_imaged']} imaged, {meta['n_overflow']} not individually imaged")
+    if meta.get("schema") == 2:
+        out.append(f"- Fires: {meta['n_hotspots']} distinct, {meta['total_frp']:,.0f} MW in total")
+        out.append(f"- Flagged: **{meta['n_severe']} severe**, {meta['n_watch']} watch "
+                   f"({meta.get('n_escalating', 0)} getting worse); {meta['n_imaged']} imaged, "
+                   f"{meta['n_overflow']} only on the overview")
+    else:
+        out.append(f"- Hotspots: {meta['n_hotspots']} in {meta['n_clusters']} clusters; "
+                   f"{meta['n_imaged']} imaged, {meta['n_overflow']} not individually imaged")
     out.append(f"- Winds: {meta['winds']}")
     out.append("")
     if meta["status"] == "no_hotspots":
         out.append("No VIIRS hotspots were found in the region in the selected window.")
+    elif meta["status"] == "no_flagged":
+        out.append("Fires were detected, but none is dense or intense enough to flag as severe or watch, so no images were made.")
     elif meta["status"] == "no_imagery":
         out.append("Hotspots were found, but no complete Himawari-9 scan was available; no imagery was made.")
     for c in clusters.get("clusters", []):
-        out.append(f"## {c['id']}: {c['count']} hotspots, {c['summed_frp']:.0f} MW")
+        tier = f"{c['tier'].upper()} " if c.get("tier") else ""
+        out.append(f"## {c['id']} {tier}: {c['count']} fires, {c['summed_frp']:.0f} MW".replace(" :", ":"))
+        if c.get("reasons"):
+            out.append("")
+            out.append("Why: " + ", ".join(c["reasons"])
+                       + (f"; {c['trend']['state']} vs the earlier run" if c.get("trend") else ""))
         out.append("")
         out.append(f"Centroid {c['centroid']['lat']:.2f}, {c['centroid']['lon']:.2f}; mode: {c.get('mode') or 'n/a'}"
                    + (" (obscured by cloud)" if c.get("obscured") else ""))
@@ -61,6 +74,11 @@ def latest_md(meta: dict, clusters: dict) -> str:
             out.append(f"![{c['id']}](runs/{rid}/{c['png']})")
         else:
             out.append(f"_No image: {c.get('image_error') or 'not available'}_")
+        out.append("")
+    if clusters.get("overflow") and clusters["overflow"][0].get("tier"):
+        out += ["## Flagged, not individually imaged", ""]
+        out += [f"- {c['id']} {c['tier']}: {c['count']} fires, {c['summed_frp']:.0f} MW at "
+                f"{c['centroid']['lat']:.2f}, {c['centroid']['lon']:.2f}" for c in clusters["overflow"]]
         out.append("")
     if clusters.get("overview"):
         out += ["## Overview", "", f"![overview](runs/{rid}/{clusters['overview']['png']})", ""]
