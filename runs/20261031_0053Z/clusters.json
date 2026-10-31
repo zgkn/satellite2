@@ -1,0 +1,75 @@
+{
+ "schema": 2,
+ "run_id": "20261031_0053Z",
+ "scan_utc": "2026-10-31 00:40 UTC",
+ "scan_sgt": "2026-10-31 08:40 SGT",
+ "winds": "ECMWF IFS 925 hPa, run 30 Oct 18Z, +6/+9 h",
+ "has_confidence": true,
+ "rules": {
+  "dense_min": 30,
+  "dense_km": 10.0,
+  "intense_sum_mw": 500.0,
+  "intense_pixel_mw": 100.0
+ },
+ "clusters": [
+  {
+   "id": "C01",
+   "rank": 1,
+   "tier": "severe",
+   "reasons": [
+    "32 fires within 10 km",
+    "660 MW total"
+   ],
+   "dense": true,
+   "intense": true,
+   "centroid": {
+    "lon": 114.36959,
+    "lat": -2.37233
+   },
+   "count": 143,
+   "core_fires": 32,
+   "summed_frp": 660.1,
+   "max_frp": 46.5,
+   "cluster_bbox": [
+    114.00446,
+    -2.86416,
+    114.72931,
+    -2.03046
+   ],
+   "trend": null,
+   "newest_utc": "2026-10-30T18:40:25Z",
+   "satellites": [
+    "NOAA-20",
+    "NOAA-21",
+    "S-NPP"
+   ],
+   "confidence": {
+    "low": 0,
+    "nominal": 138,
+    "high": 5
+   },
+   "bbox": [
+    113.01,
+    -3.8,
+    115.72,
+    -1.095
+   ],
+   "mode": "day",
+   "png": "C01.png",
+   "thumb": "C01_t.jpg",
+   "obscured": true,
+   "sun_zenith": 52.2,
+   "size_px": [
+    542,
+    541
+   ],
+   "cloud_fraction": 0.71,
+   "winds": "drawn"
+  }
+ ],
+ "overview": null,
+ "n_overflow": 0,
+ "overflow": [],
+ "n_ignored": 137,
+ "scan_iso": "2026-10-31T00:40:00Z"
+}

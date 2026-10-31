@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0f1318">
+<title>Fire map: Sumatra and Kalimantan</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="bar">
+  <div class="row">
+    <h1>Fire map <span class="sub">Sumatra &amp; Kalimantan</span></h1>
+    <label class="sel"><span class="vh">Run</span>
+      <select id="runSel" aria-label="Run"></select>
+    </label>
+  </div>
+  <div id="strip" class="strip" aria-live="polite"></div>
+  <div id="banner" class="banner" hidden></div>
+</header>
+
+<main>
+  <div id="map" role="application" aria-label="Map of VIIRS hotspots and Himawari-9 crops"></div>
+  <section id="cardsWrap">
+    <h2>Flagged areas</h2>
+    <div id="cards" class="cards"></div>
+    <p id="rules" class="rules" hidden></p>
+  </section>
+</main>
+
+<footer>
+  <p><strong>Severe</strong> areas have fires packed tight <em>and</em> a lot of heat; <strong>watch</strong> areas have one of the two. Hotspots are only the pointer: NOAA VIIRS 375&nbsp;m active fire (EFIRE; NOAA-20, NOAA-21, S-NPP).
+  The product is the latest <strong>Himawari-9</strong> AHI image (JMA, via the NOAA Open Data Dissemination
+  program) cropped to each cluster. Day Fire RGB follows the NOAA/CIRA recipe on AHI bands; at night the
+  3.9&nbsp;&micro;m band is shown.</p>
+  <p><strong>Streamlines:</strong> ECMWF IFS open data, 925&nbsp;hPa wind, licensed
+  <a href="https://creativecommons.org/licenses/by/4.0/" rel="noopener">CC-BY-4.0</a>.
+  They are model output, not observations, and can disagree with what the clouds show.</p>
+  <p>Basemaps: Esri World Imagery, &copy; OpenStreetMap contributors. Coastlines: Natural Earth (public domain).
+  Himawari 3.9&nbsp;&micro;m pixels are 2&nbsp;km, so images look blocky. Not an official fire product.</p>
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
